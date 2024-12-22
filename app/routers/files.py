@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.sql import func
 from sqlalchemy.orm import Session
+from starlette import status
 
 from app.cron import scheduler, schedule_file_deletion
 from app.database import SessionLocal
@@ -32,15 +33,22 @@ async def connection():
 
 @router.get(
     "/files",
-    dependencies=[Depends(is_token_expired), Depends(is_authenticated)],
+    dependencies=[Depends(is_token_expired)],
     summary="Get all files",
     response_model=list[FilesFavorite],
 )
-async def get_all_files(q: str | None = None, db: Session = Depends(get_db)):
+async def get_all_files(
+        q: str | None = None,
+        db: Session = Depends(get_db),
+        user_id: int | None = Depends(is_authenticated)
+):
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     if q:
         files = (
             db.query(models.File, models.Favorite.id)
             .filter(
+                models.File.user_id == user_id,
                 models.File.should_delete.is_(False),
                 func.lower(models.File.name).contains(q),
             )
@@ -51,7 +59,10 @@ async def get_all_files(q: str | None = None, db: Session = Depends(get_db)):
     else:
         files = (
             db.query(models.File, models.Favorite.id)
-            .filter_by(should_delete=False)
+            .filter(
+                models.File.user_id == user_id,
+                models.File.should_delete.is_(False),
+            )
             .join(models.Favorite, isouter=True)
             .order_by(models.File.created_at.desc())
             .all()
@@ -64,15 +75,22 @@ async def get_all_files(q: str | None = None, db: Session = Depends(get_db)):
 
 @router.get(
     "/favorites",
-    dependencies=[Depends(is_token_expired), Depends(is_authenticated)],
+    dependencies=[Depends(is_token_expired)],
     summary="Get all favorites files",
     response_model=list[FilesFavorite],
 )
-async def get_all_favorites(q: str | None = None, db: Session = Depends(get_db)):
+async def get_all_favorites(
+        q: str | None = None,
+        db: Session = Depends(get_db),
+        user_id: int | None = Depends(is_authenticated)
+):
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     if q:
         files = (
             db.query(models.File, models.Favorite.id)
             .filter(
+                models.File.user_id == user_id,
                 models.File.should_delete.is_(False),
                 func.lower(models.File.name).contains(q),
             )
@@ -82,7 +100,10 @@ async def get_all_favorites(q: str | None = None, db: Session = Depends(get_db))
     else:
         files = (
             db.query(models.File, models.Favorite.id)
-            .filter_by(should_delete=False)
+            .filter(
+                models.File.user_id == user_id,
+                models.File.should_delete.is_(False),
+            )
             .join(models.File.favorites)
             .all()
         )
@@ -94,22 +115,36 @@ async def get_all_favorites(q: str | None = None, db: Session = Depends(get_db))
 
 @router.get(
     "/deleted",
-    dependencies=[Depends(is_token_expired), Depends(is_authenticated)],
+    dependencies=[Depends(is_token_expired)],
     summary="Get all deleted files",
     response_model=list[Files],
 )
-async def get_all_deleted(q: str | None = None, db: Session = Depends(get_db)):
+async def get_all_deleted(
+        q: str | None = None,
+        db: Session = Depends(get_db),
+        user_id: int | None = Depends(is_authenticated)
+):
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     if q:
         files = (
             db.query(models.File)
             .filter(
+                models.File.user_id == user_id,
                 models.File.should_delete.is_(True),
                 func.lower(models.File.name).contains(q),
             )
             .all()
         )
     else:
-        files = db.query(models.File).filter_by(should_delete=True).all()
+        files = (
+            db.query(models.File)
+            .filter(
+                models.File.user_id == user_id,
+                models.File.should_delete.is_(True),
+            )
+            .all()
+        )
 
     return [{"data": file} for file in files]
 

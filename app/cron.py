@@ -17,7 +17,7 @@ async def schedule_file_deletion(db, file_obj, filename):
         except Exception as e:
             print(f"Error occurred during file deletion: {e}")
 
-    date = datetime.now() + timedelta(minutes=2)
+    date = datetime.now() + timedelta(seconds=15)
     job = scheduler.add_job(delete_file, "date", run_date=date)
 
     print("Job has been scheduled successfully")
