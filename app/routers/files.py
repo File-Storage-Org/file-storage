@@ -1,9 +1,11 @@
+import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.sql import func
 from sqlalchemy.orm import Session
 from starlette import status
+from minio.error import S3Error, ServerError
 
 from app.cron import scheduler, schedule_file_deletion
 from app.database import SessionLocal
@@ -11,11 +13,15 @@ from app import models
 from app.deps import is_token_expired
 from app.schemas import File, Favorite, FileID, FilesFavorite, Files
 from app.perms.isAuthenticated import is_authenticated
-from app.minio import upload_file as upload, remove_extension
+from app.services.minio import upload_file as upload_to_minio_s3, delete_file as delete_file_from_minio_s3
+from app.services.text_extractor import TextExtractor
+from app.services.pinecone_serv import PineconeService
+
+SUPPORTIVE_DOC_TYPES = [".docx", ".pptx", ".txt", ".pdf"]
 
 router = APIRouter()
+pc = PineconeService()
 scheduler.start()
-
 
 # Dependency
 def get_db():
@@ -38,79 +44,50 @@ async def connection():
     response_model=list[FilesFavorite],
 )
 async def get_all_files(
-        q: str | None = None,
         db: Session = Depends(get_db),
         user_id: int | None = Depends(is_authenticated)
 ):
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if q:
-        files = (
-            db.query(models.File, models.Favorite.id)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(False),
-                func.lower(models.File.name).contains(q),
-            )
-            .join(models.Favorite, isouter=True)
-            .order_by(models.File.created_at.desc())
-            .all()
+    
+    files = (
+        db.query(models.File, models.Favorite.id)
+        .filter(
+            models.File.user_id == user_id,
+            models.File.should_delete.is_(False)
         )
-    else:
-        files = (
-            db.query(models.File, models.Favorite.id)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(False),
-            )
-            .join(models.Favorite, isouter=True)
-            .order_by(models.File.created_at.desc())
-            .all()
-        )
+        .join(models.Favorite, isouter=True)
+        .order_by(models.File.created_at.desc())
+        .all()
+    )
 
-    result = [{"data": file, "fav": fav_id} for file, fav_id in files]
-
-    return result
+    return [{"data": file, "fav": fav_id} for file, fav_id in files]
 
 
 @router.get(
     "/favorites",
     dependencies=[Depends(is_token_expired)],
-    summary="Get all favorites files",
+    summary="Get all fav files",
     response_model=list[FilesFavorite],
 )
 async def get_all_favorites(
-        q: str | None = None,
         db: Session = Depends(get_db),
         user_id: int | None = Depends(is_authenticated)
 ):
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if q:
-        files = (
-            db.query(models.File, models.Favorite.id)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(False),
-                func.lower(models.File.name).contains(q),
-            )
-            .join(models.File.favorites)
-            .all()
+    
+    files = (
+        db.query(models.File, models.Favorite.id)
+        .filter(
+            models.File.user_id == user_id,
+            models.File.should_delete.is_(False)
         )
-    else:
-        files = (
-            db.query(models.File, models.Favorite.id)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(False),
-            )
-            .join(models.File.favorites)
-            .all()
-        )
+        .join(models.File.favorites)
+        .all()
+    )
 
-    result = [{"data": file, "fav": fav_id} for file, fav_id in files]
-
-    return result
+    return [{"data": file, "fav": fav_id} for file, fav_id in files]
 
 
 @router.get(
@@ -120,33 +97,96 @@ async def get_all_favorites(
     response_model=list[Files],
 )
 async def get_all_deleted(
-        q: str | None = None,
         db: Session = Depends(get_db),
         user_id: int | None = Depends(is_authenticated)
 ):
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if q:
-        files = (
-            db.query(models.File)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(True),
-                func.lower(models.File.name).contains(q),
-            )
-            .all()
+
+    files = (
+        db.query(models.File)
+        .filter(
+            models.File.user_id == user_id,
+            models.File.should_delete.is_(True)
         )
-    else:
-        files = (
-            db.query(models.File)
-            .filter(
-                models.File.user_id == user_id,
-                models.File.should_delete.is_(True),
-            )
-            .all()
-        )
+        .all()
+    )
 
     return [{"data": file} for file in files]
+
+
+@router.get(
+    "/search",
+    dependencies=[Depends(is_token_expired)],
+    summary="Get all matchup files",
+    response_model=list[FilesFavorite],
+)
+async def get_all_search_matchups(
+        q: str,
+        db: Session = Depends(get_db),
+        user_id: int | None = Depends(is_authenticated)
+):
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if not q:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query is empty!")
+
+    files = (
+        db.query(models.File, models.Favorite.id)
+        .filter(
+            models.File.user_id == user_id,
+            models.File.should_delete.is_(False),
+            func.lower(models.File.name).contains(q),
+        )
+        .join(models.Favorite, isouter=True)
+        .order_by(models.File.created_at.desc())
+        .all()
+    )
+
+    return [{"data": file, "fav": fav_id} for file, fav_id in files]
+
+
+@router.get(
+    "/ai-search",
+    dependencies=[Depends(is_token_expired)],
+    summary="Get all AI matchup files",
+    response_model=list[FilesFavorite],
+)
+async def get_all_ai_matchup_files(
+        q: str,
+        db: Session = Depends(get_db),
+        user_id: int | None = Depends(is_authenticated)
+):
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if not q:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query is empty!")
+    
+    try:
+        matched_embeddings = pc.get_matched_embeddings(query=q)["matches"]
+        file_ids: list[int] = []
+        if len(matched_embeddings):
+            for file in matched_embeddings:
+                # file["score"] is accurate percentage of the answer
+                file_ids.append(int(file["metadata"]["doc_id"]))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error in receiving mathchings - {e}"
+        )
+
+    files = (
+        db.query(models.File, models.Favorite.id)
+        .filter(
+            models.File.user_id == user_id,
+            models.File.should_delete.is_(False),
+            models.File.id.in_(set(file_ids)),
+        )
+        .join(models.Favorite, isouter=True)
+        .order_by(models.File.created_at.desc())
+        .all()
+    )
+
+    return [{"data": file, "fav": fav_id} for file, fav_id in files]
 
 
 @router.get(
@@ -163,7 +203,7 @@ async def get_file(file_id: int, db: Session = Depends(get_db)):
 
 @router.post(
     "/file/upload",
-    dependencies=[Depends(is_token_expired), Depends(is_authenticated)],
+    dependencies=[Depends(is_token_expired)],
     summary="Create file",
     response_model=File,
 )
@@ -172,26 +212,52 @@ async def upload_file(
     user_id: Annotated[str, Depends(is_authenticated)],
     db: Session = Depends(get_db),
 ):
-    extension = file.headers.get("content-type").split("/")[1]
-    # Upload the file to storage minIO
-    file_url, file_uuid = await upload(file, extension)
+    try:
+        file_name, file_ext = os.path.splitext(file.filename)
+        file_content = await file.read()
+        if not file_ext:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Your file doesn't have an extension, please edit it."
+            )
 
-    filename = remove_extension(file.filename)
+        # Upload the file to storage minIO
+        try:
+            file_url = await upload_to_minio_s3(file_content, file.filename)
+        except S3Error as s3_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"S3 Error - {str(s3_error)}"
+            )
+        except ServerError as serv_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"MinIO Server Error - {str(serv_error)}"
+            )
 
-    db_file = models.File(
-        name=filename,
-        file=file_url,
-        file_uuid=file_uuid,
-        user_id=int(user_id),
-        format=extension,
-    )
-    db.add(db_file)
-    db.commit()
-    db.refresh(db_file)
+        # Add file to PostgreSQL
+        with db.begin():
+            db_file = models.File(
+                name=file_name,
+                file=file_url,
+                user_id=int(user_id),
+                format=file_ext,
+            )
+            db.add(db_file)
+            db.flush() # add db_file.id to instance
 
-    uploaded_file = db.query(models.File).filter_by(id=db_file.id).first()
+            if file_ext in SUPPORTIVE_DOC_TYPES:
+                # Add file to Pinecone
+                try:
+                    text = TextExtractor(file=file_content, file_ext=file_ext).extract()
+                    print(text)
+                    pc.upload_embeddings(text, str(db_file.id))
+                except Exception as e:
+                    # TODO: find a list of pinecone exceptions
+                    db.rollback()
+                    delete_file_from_minio_s3(db_file)
+                    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-    return uploaded_file
+        return db_file
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.delete(
@@ -213,7 +279,7 @@ async def delete_file(
         db.commit()
         db.refresh(file_to_delete)
 
-        job_id = await schedule_file_deletion(db, file_to_delete, file_to_delete.name)
+        job_id = await schedule_file_deletion(db, file_to_delete)
         job_instance = models.ScheduledJob(file_id=file_id, job_id=job_id)
         db.add(job_instance)
         db.commit()

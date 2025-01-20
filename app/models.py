@@ -12,7 +12,6 @@ class File(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     file = Column(String, nullable=False)
-    file_uuid = Column(UUID, nullable=False)
     user_id = Column(Integer, nullable=False)
     format = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

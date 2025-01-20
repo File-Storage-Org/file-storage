@@ -8,7 +8,6 @@ class File(BaseModel):
     id: int
     name: str
     file: str
-    file_uuid: uuid.UUID
     user_id: int
     format: str
     should_delete: bool
