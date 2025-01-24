@@ -61,7 +61,7 @@ async def get_all_files(
         .all()
     )
 
-    return [{"data": file, "fav": fav_id} for file, fav_id in files]
+    return [{"data": file, "fav": bool(fav_id)} for file, fav_id in files]
 
 
 @router.get(
@@ -87,7 +87,7 @@ async def get_all_favorites(
         .all()
     )
 
-    return [{"data": file, "fav": fav_id} for file, fav_id in files]
+    return [{"data": file, "fav": bool(fav_id)} for file, fav_id in files]
 
 
 @router.get(
@@ -143,7 +143,7 @@ async def get_all_search_matchups(
         .all()
     )
 
-    return [{"data": file, "fav": fav_id} for file, fav_id in files]
+    return [{"data": file, "fav": bool(fav_id)} for file, fav_id in files]
 
 
 @router.get(
@@ -186,7 +186,7 @@ async def get_all_ai_matchup_files(
         .all()
     )
 
-    return [{"data": file, "fav": fav_id} for file, fav_id in files]
+    return [{"data": file, "fav": bool(fav_id)} for file, fav_id in files]
 
 
 @router.get(
@@ -355,7 +355,10 @@ async def add_to_favorites(
             db.commit()
 
             return Favorite(
-                id=is_fav.id, file_id=is_fav.file_id, user_id=is_fav.user_id
+                id=is_fav.id,
+                file_id=is_fav.file_id,
+                user_id=is_fav.user_id,
+                fav=False,
             )
 
         favorite = models.Favorite(user_id=int(user_id), file_id=file.file_id)
@@ -365,4 +368,11 @@ async def add_to_favorites(
     else:
         raise HTTPException(status_code=400, detail="file_id is None")
 
-    return favorite
+    return (
+        Favorite(
+            id=favorite.id,
+            file_id=favorite.file_id,
+            user_id=favorite.user_id,
+            fav=True,
+        )
+    )

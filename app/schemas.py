@@ -22,6 +22,7 @@ class Favorite(BaseModel):
     id: int
     user_id: int
     file_id: int
+    fav: bool
 
     class Config:
         from_attributes = True
@@ -32,7 +33,7 @@ class Files(BaseModel):
 
 
 class FilesFavorite(Files):
-    fav: int | None
+    fav: bool
 
 
 class FileID(BaseModel):
